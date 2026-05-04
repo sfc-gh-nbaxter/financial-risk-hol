@@ -29,7 +29,7 @@ md("""# Financial Services Risk Management — Hands-On Lab
 
 | Detail | Value |
 |---|---|
-| **Duration** | ~90 minutes |
+| **Duration** | ~120 minutes |
 | **Prerequisites** | Snowflake account (Enterprise or [30-day trial](https://signup.snowflake.com/)) |
 | **Warehouse** | SMALL, auto-suspend 60 s |
 
