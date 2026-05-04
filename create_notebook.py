@@ -47,7 +47,8 @@ md("""# Financial Services Risk Management — Hands-On Lab
 | **7** | Unstructured Data | Internal Stages, Directory Tables |
 | **8** | Market Data Enrichment | Synthetic Market Data, Data Enrichment via JOINs |
 | **9** | Cortex AI Functions | AI_CLASSIFY, AI_SENTIMENT, AI_EXTRACT, SUMMARIZE |
-| **10** | Cleanup | DROP objects |
+| **10** | Snowflake Intelligence | Semantic Views, Cortex Search, Cortex Agent |
+| **11** | Cleanup | DROP objects |
 
 ---
 
@@ -951,14 +952,213 @@ SELECT SNOWFLAKE.CORTEX.SUMMARIZE(all_descriptions) AS critical_events_summary
 FROM recent_critical;""", name="9.4 Summarise Query")
 
 # =============================================================================
-# STEP 10 — CLEANUP
+# STEP 10 — SNOWFLAKE INTELLIGENCE
 # =============================================================================
 md("""---
-## 10 · Cleanup (Optional)
-Drop the lab schemas, warehouse, and custom roles. The **NOTEBOOKS** schema is preserved so this notebook remains available.""", name="10 · Cleanup")
+## 10 · Snowflake Intelligence
+
+**Snowflake Intelligence** combines structured data, unstructured documents, and external web knowledge into a single conversational AI agent. In this step we build all three components:
+
+| Component | Purpose | Snowflake Feature |
+|---|---|---|
+| Semantic View | Natural-language queries over risk metrics | Cortex Analyst |
+| Cortex Search Service | Semantic search over risk documents | Cortex Search (RAG) |
+| Cortex Agent | Orchestrates all tools into one assistant | Cortex Agent + Snowflake Intelligence |
+
+The agent will be able to answer questions like *"What is our total exposure by region?"*, *"Find documents about Basel III"*, and *"What are the latest capital requirements?"* — all from a single chat interface.""", name="10 · Snowflake Intelligence")
+
+md("""### 10.1 — Create a Semantic View
+A **Semantic View** defines business-friendly dimensions and metrics over your tables. Cortex Analyst uses it to convert natural language into SQL. We also add **verified queries** — pre-validated question/SQL pairs that improve accuracy and serve as onboarding suggestions.""", name="10.1 Semantic View")
+
+sql("""USE ROLE risk_admin;
+USE WAREHOUSE risk_wh;
+
+CREATE OR REPLACE SEMANTIC VIEW risk_hol.analytics.risk_exposure_sv
+
+  TABLES (
+    risk_summary AS risk_hol.analytics.risk_summary
+      PRIMARY KEY (event_type, severity, region, month)
+      COMMENT = 'Monthly risk event aggregations by type, severity, and region'
+  )
+
+  DIMENSIONS (
+    risk_summary.event_type_dim AS event_type
+      WITH SYNONYMS = ('risk type', 'category')
+      COMMENT = 'Type of risk event: CREDIT, MARKET, OPERATIONAL, LIQUIDITY, or COUNTERPARTY',
+    risk_summary.severity_dim AS severity
+      WITH SYNONYMS = ('risk level', 'priority')
+      COMMENT = 'Severity level: LOW, MEDIUM, HIGH, or CRITICAL',
+    risk_summary.region_dim AS region
+      COMMENT = 'Geographic region: AMERICAS, EMEA, or APAC',
+    risk_summary.month_dim AS month
+      COMMENT = 'Month of the risk events (DATE truncated to first of month)'
+  )
+
+  METRICS (
+    risk_summary.total_events AS SUM(event_count)
+      COMMENT = 'Total number of risk events',
+    risk_summary.total_exposure_usd AS SUM(total_exposure)
+      WITH SYNONYMS = ('exposure', 'total exposure', 'financial exposure')
+      COMMENT = 'Total financial exposure in USD',
+    risk_summary.avg_risk_score AS AVG(avg_risk_score)
+      COMMENT = 'Average risk score on a scale of 1-100',
+    risk_summary.total_open_events AS SUM(open_events)
+      WITH SYNONYMS = ('open events', 'unresolved events')
+      COMMENT = 'Number of events still in OPEN status'
+  )
+
+  COMMENT = 'Semantic view for risk exposure analysis'
+
+  AI_VERIFIED_QUERIES (
+    exposure_by_region AS (
+      QUESTION 'What is the total exposure by region?'
+      VERIFIED_AT 1714780800
+      ONBOARDING_QUESTION TRUE
+      VERIFIED_BY '(STEWARD = risk_admin)'
+      SQL 'SELECT region, SUM(total_exposure) AS total_exposure_usd FROM risk_hol.analytics.risk_summary GROUP BY region ORDER BY total_exposure_usd DESC'
+    ),
+    critical_events_by_type AS (
+      QUESTION 'How many critical events do we have by event type?'
+      VERIFIED_AT 1714780800
+      ONBOARDING_QUESTION TRUE
+      VERIFIED_BY '(STEWARD = risk_admin)'
+      SQL 'SELECT event_type, SUM(event_count) AS critical_events FROM risk_hol.analytics.risk_summary WHERE severity = ''CRITICAL'' GROUP BY event_type ORDER BY critical_events DESC'
+    ),
+    monthly_trend AS (
+      QUESTION 'Show me the monthly trend of total exposure'
+      VERIFIED_AT 1714780800
+      ONBOARDING_QUESTION TRUE
+      VERIFIED_BY '(STEWARD = risk_admin)'
+      SQL 'SELECT month, SUM(total_exposure) AS total_exposure_usd FROM risk_hol.analytics.risk_summary GROUP BY month ORDER BY month'
+    ),
+    open_events_by_severity AS (
+      QUESTION 'Which severity level has the most open events?'
+      VERIFIED_AT 1714780800
+      VERIFIED_BY '(STEWARD = risk_admin)'
+      SQL 'SELECT severity, SUM(open_events) AS total_open FROM risk_hol.analytics.risk_summary GROUP BY severity ORDER BY total_open DESC'
+    ),
+    highest_risk_region AS (
+      QUESTION 'Which region has the highest average risk score?'
+      VERIFIED_AT 1714780800
+      VERIFIED_BY '(STEWARD = risk_admin)'
+      SQL 'SELECT region, ROUND(AVG(avg_risk_score), 1) AS avg_score FROM risk_hol.analytics.risk_summary GROUP BY region ORDER BY avg_score DESC LIMIT 1'
+    ),
+    operational_risk_emea AS (
+      QUESTION 'What is the total exposure for operational risk events in EMEA?'
+      VERIFIED_AT 1714780800
+      VERIFIED_BY '(STEWARD = risk_admin)'
+      SQL 'SELECT SUM(total_exposure) AS operational_exposure_emea FROM risk_hol.analytics.risk_summary WHERE event_type = ''OPERATIONAL'' AND region = ''EMEA'''
+    )
+  );""", name="10.1a Create Semantic View")
+
+sql("""SHOW SEMANTIC VIEWS IN SCHEMA risk_hol.analytics;""", name="10.1b Verify Semantic View")
+
+md("""### 10.2 — Create Cortex Search Service
+A **Cortex Search Service** indexes unstructured text for semantic search and retrieval-augmented generation (RAG). We index the `summary` column of our document catalogue so the agent can find relevant risk documents.""", name="10.2 Cortex Search")
+
+sql("""CREATE OR REPLACE CORTEX SEARCH SERVICE risk_hol.unstructured.risk_docs_search
+    ON summary
+    ATTRIBUTES doc_type, department
+    WAREHOUSE = risk_wh
+    TARGET_LAG = '1 hour'
+AS (
+    SELECT doc_id, file_name, doc_type, department, upload_date, summary
+    FROM risk_hol.unstructured.document_catalogue
+);""", name="10.2a Create Search Service")
+
+sql("""SELECT PARSE_JSON(
+  SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    'risk_hol.unstructured.risk_docs_search',
+    '{
+      "query": "capital adequacy regulatory filing",
+      "columns": ["file_name", "doc_type", "summary"],
+      "limit": 3
+    }'
+  )
+)['results'] AS search_results;""", name="10.2b Test Search")
+
+md("""### 10.3 — Create Cortex Agent
+The **Cortex Agent** orchestrates multiple tools — structured data (Cortex Analyst), document search (Cortex Search), web search, and charting — into a single conversational interface accessible via Snowflake Intelligence.""", name="10.3 Cortex Agent")
+
+sql("""CREATE OR REPLACE AGENT risk_hol.analytics.risk_intelligence_agent
+    COMMENT = 'Risk management agent for Snowflake Intelligence'
+    FROM SPECIFICATION
+    $$
+    models:
+      orchestration: auto
+
+    instructions:
+      system: "You are a financial risk management assistant for a global bank. Answer questions about risk events, exposure, severity, and regulatory documents. Use the structured data tool for quantitative questions about risk metrics. Use the document search tool for policy and regulatory document questions. Use web search for external regulatory updates or market context."
+      sample_questions:
+        - question: "What is our total exposure by region?"
+        - question: "How many critical events do we have by event type?"
+        - question: "Show me the monthly trend of total exposure"
+        - question: "What regulatory documents do we have about Basel III?"
+        - question: "What are the latest Basel IV capital requirements?"
+        - question: "Which region has the highest average risk score?"
+        - question: "Find documents related to stress testing"
+        - question: "What is our operational risk exposure in EMEA?"
+
+    tools:
+      - tool_spec:
+          type: "cortex_analyst_text_to_sql"
+          name: "risk_data_analyst"
+          description: "Queries structured risk event data including exposure amounts, event counts, risk scores, and open events. Covers dimensions: event type (CREDIT, MARKET, OPERATIONAL, LIQUIDITY, COUNTERPARTY), severity (LOW, MEDIUM, HIGH, CRITICAL), region (AMERICAS, EMEA, APAC), and month. Use for quantitative questions about risk metrics."
+      - tool_spec:
+          type: "cortex_search"
+          name: "risk_document_search"
+          description: "Searches internal risk management documents including VaR reports, Basel III filings, incident logs, credit reviews, stress test results, and AML templates. Use for questions about policies, procedures, regulatory filings, or specific document contents."
+      - tool_spec:
+          type: "web_search"
+          name: "web_search"
+          description: "Searches the public web for external regulatory updates, Basel committee publications, market news, or industry context not available in internal data."
+      - tool_spec:
+          type: "data_to_chart"
+          name: "data_to_chart"
+          description: "Generates visualizations from query results. Use when the user asks to show trends, comparisons, or distributions visually."
+
+    tool_resources:
+      risk_data_analyst:
+        semantic_view: "risk_hol.analytics.risk_exposure_sv"
+      risk_document_search:
+        name: "risk_hol.unstructured.risk_docs_search"
+        max_results: "5"
+        title_column: "file_name"
+        id_column: "doc_id"
+    $$;""", name="10.3a Create Agent")
+
+md("""### 10.4 — Try it in Snowflake Intelligence
+
+Your agent is now live. Access it via **AI & ML > Agents** in Snowsight, or go to `https://ai.snowflake.com`.
+
+**Sample questions to try:**
+
+| Tool | Question |
+|---|---|
+| Cortex Analyst | *What is the total exposure by region?* |
+| Cortex Analyst | *How many critical events by event type?* |
+| Cortex Analyst | *Show me the monthly trend of total exposure* |
+| Cortex Analyst | *Which severity level has the most open events?* |
+| Cortex Analyst | *What is operational risk exposure in EMEA?* |
+| Cortex Search | *What regulatory documents do we have about Basel III?* |
+| Cortex Search | *Find documents related to stress testing* |
+| Cortex Search | *What does our AML filing template cover?* |
+| Web Search | *What are the latest Basel IV capital requirements?* |
+| Web Search | *What is the current Fed Funds rate?* |
+| Combined | *Compare our CRITICAL exposure to industry benchmarks* |""", name="10.4 Try It")
+
+# =============================================================================
+# STEP 11 — CLEANUP
+# =============================================================================
+md("""---
+## 11 · Cleanup (Optional)
+Drop the lab schemas, warehouse, and custom roles. The **NOTEBOOKS** schema is preserved so this notebook remains available.""", name="11 · Cleanup")
 
 sql("""USE ROLE accountadmin;
 
+DROP AGENT IF EXISTS risk_hol.analytics.risk_intelligence_agent;
+DROP CORTEX SEARCH SERVICE IF EXISTS risk_hol.unstructured.risk_docs_search;
+DROP SEMANTIC VIEW IF EXISTS risk_hol.analytics.risk_exposure_sv;
 DROP RESOURCE MONITOR IF EXISTS risk_wh_monitor;
 DROP SCHEMA IF EXISTS risk_hol.raw_data;
 DROP SCHEMA IF EXISTS risk_hol.analytics;
@@ -969,7 +1169,7 @@ DROP ROLE      IF EXISTS risk_admin;
 DROP ROLE      IF EXISTS risk_analyst;
 DROP ROLE      IF EXISTS risk_auditor;
 
-SELECT 'Cleanup complete — notebook preserved' AS status;""", name="10 Drop Lab Objects")
+SELECT 'Cleanup complete — notebook preserved' AS status;""", name="11 Drop Lab Objects")
 
 # =============================================================================
 # WRITE NOTEBOOK
