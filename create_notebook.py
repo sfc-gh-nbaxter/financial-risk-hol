@@ -42,10 +42,11 @@ md("""# Financial Services Risk Management — Hands-On Lab
 | **3** | Ingest & Transform Data | VARIANT, OBJECT_CONSTRUCT, LATERAL FLATTEN, Dynamic Tables |
 | **🤖** | **Cortex Code Challenge** | **Build a Streamlit app from a prompt** |
 | **4** | Security & Governance | Dynamic Data Masking, Row Access Policies |
-| **5** | Time Travel & Cloning | Zero-Copy Clone, AT(OFFSET), UNDROP |
-| **6** | Unstructured Data | Internal Stages, Directory Tables |
-| **7** | Market Data Enrichment | Synthetic Market Data, Data Enrichment via JOINs |
-| **8** | Cortex AI Functions | AI_CLASSIFY, AI_SENTIMENT, AI_EXTRACT, AI_SUMMARIZE |
+| **5** | FinOps & Cost Management | Resource Monitors, Budgets, AI Cost Tracking |
+| **6** | Time Travel & Cloning | Zero-Copy Clone, AT(OFFSET), UNDROP |
+| **7** | Unstructured Data | Internal Stages, Directory Tables |
+| **8** | Market Data Enrichment | Synthetic Market Data, Data Enrichment via JOINs |
+| **9** | Cortex AI Functions | AI_CLASSIFY, AI_SENTIMENT, AI_EXTRACT, SUMMARIZE |
 | **10** | Cleanup | DROP objects |
 
 ---
@@ -586,13 +587,113 @@ GROUP BY severity;""", name="4.3c Query as Auditor")
 sql("""USE ROLE risk_admin;""", name="4.3d Reset Role")
 
 # =============================================================================
-# STEP 5 — TIME TRAVEL & CLONING
+# STEP 5 — FINOPS & COST MANAGEMENT
 # =============================================================================
 md("""---
-## 5 · Time Travel & Zero-Copy Cloning""", name="5 · Time Travel & Cloning")
+## 5 · FinOps & Cost Management
 
-md("""### 5.1 — Zero-Copy Clone
-`CLONE` creates an instant, metadata-only copy of a table (or database/schema). No data is physically duplicated — storage is shared until one side diverges.""", name="5.1 Zero-Copy Clone")
+Snowflake provides three layers of cost governance:
+
+| Layer | Scope | Key Feature |
+|---|---|---|
+| **Resource Monitors** | Warehouse credit quotas | Notify / suspend when thresholds are reached |
+| **Budgets** | Account or custom object groups | Monthly spend limits with forecasting-based alerts |
+| **ACCOUNT_USAGE views** | Historical reporting | Warehouse credits, serverless metering, Cortex AI tokens |
+
+In financial services, tight cost controls are essential for regulatory compliance and operational discipline.""", name="5 · FinOps & Cost Management")
+
+md("""### 5.1 — Resource Monitor
+A **Resource Monitor** sets a credit quota on one or more warehouses. When usage reaches a threshold, Snowflake can notify administrators or suspend the warehouse automatically. Only `ACCOUNTADMIN` can create resource monitors.
+
+| Trigger | Action |
+|---|---|
+| 75% of quota | Send notification |
+| 100% of quota | Suspend warehouse (finish running queries) |
+| 110% of quota | Suspend immediately (cancel running queries) |""", name="5.1 Resource Monitor")
+
+sql("""USE ROLE accountadmin;
+
+CREATE OR REPLACE RESOURCE MONITOR risk_wh_monitor
+    WITH CREDIT_QUOTA = 10
+    FREQUENCY = MONTHLY
+    START_TIMESTAMP = IMMEDIATELY
+    TRIGGERS ON 75 PERCENT DO NOTIFY
+             ON 100 PERCENT DO SUSPEND
+             ON 110 PERCENT DO SUSPEND_IMMEDIATE;
+
+ALTER WAREHOUSE risk_wh SET RESOURCE_MONITOR = risk_wh_monitor;""", name="5.1a Create Monitor")
+
+sql("""SHOW RESOURCE MONITORS LIKE 'RISK%';""", name="5.1b Verify Monitor")
+
+md("""### 5.2 — Warehouse Credit Usage
+The `SNOWFLAKE.ACCOUNT_USAGE` schema provides 365 days of historical data with ~45-minute latency. `WAREHOUSE_METERING_HISTORY` tracks compute credits consumed by each warehouse per hour.""", name="5.2 Warehouse Credits")
+
+sql("""SELECT
+    warehouse_name,
+    DATE_TRUNC('DAY', start_time)        AS usage_date,
+    SUM(credits_used)                    AS total_credits,
+    SUM(credits_used_compute)            AS compute_credits,
+    SUM(credits_used_cloud_services)     AS cloud_credits
+FROM snowflake.account_usage.warehouse_metering_history
+WHERE start_time >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+GROUP BY warehouse_name, usage_date
+ORDER BY usage_date DESC, total_credits DESC;""", name="5.2 Query WH Credits")
+
+md("""### 5.3 — Cortex AI Consumption
+Cortex AI Functions (AI_CLASSIFY, AI_SENTIMENT, etc.) are billed per token. Two views help track this spend:
+
+| View | Granularity | Key Columns |
+|---|---|---|
+| `METERING_DAILY_HISTORY` | Daily totals by service type | `SERVICE_TYPE`, `CREDITS_USED` |
+| `CORTEX_AI_FUNCTIONS_USAGE_HISTORY` | Per-query detail | `FUNCTION_NAME`, `MODEL_NAME`, `CREDITS`, `TOKENS` |
+
+> **Tip:** Run these queries after completing Step 9 (Cortex AI Functions) to see the actual cost of the AI calls you made in this lab.""", name="5.3 Cortex AI Costs")
+
+sql("""SELECT
+    service_type,
+    DATE_TRUNC('DAY', usage_date)   AS day,
+    SUM(credits_used)               AS total_credits
+FROM snowflake.account_usage.metering_daily_history
+WHERE service_type IN ('AI_SERVICES', 'CORTEX_CODE_CLI', 'CORTEX_CODE_SNOWSIGHT')
+  AND usage_date >= DATEADD('day', -30, CURRENT_DATE())
+GROUP BY service_type, day
+ORDER BY day DESC, total_credits DESC;""", name="5.3a AI Daily Credits")
+
+sql("""SELECT
+    DATE_TRUNC('DAY', start_time)   AS usage_date,
+    function_name,
+    model_name,
+    SUM(credits)                    AS total_credits,
+    SUM(tokens)                     AS total_tokens,
+    COUNT(DISTINCT query_id)        AS query_count
+FROM snowflake.account_usage.cortex_ai_functions_usage_history
+WHERE start_time >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+GROUP BY usage_date, function_name, model_name
+ORDER BY usage_date DESC, total_credits DESC;""", name="5.3b AI Per-Function Detail")
+
+md("""### 5.4 — Budgets (Overview)
+**Budgets** are Snowflake's modern cost governance layer. Unlike resource monitors (warehouse-only), budgets cover **all** credit-consuming services — including serverless features like Dynamic Tables, Cortex AI, and Snowpipe. Budgets use time-series forecasting to alert you *before* you exceed your monthly limit.
+
+> **Note:** If the budget is already activated, the ACTIVATE call will return a `BUDGET_ALREADY_ACTIVATED` error — this is safe to ignore.""", name="5.4 Budgets")
+
+sql("""-- Activate account budget (ignore error if already activated)
+CALL SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!ACTIVATE();""", name="5.4a Activate Budget")
+
+sql("""CALL SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!SET_SPENDING_LIMIT(500);""", name="5.4b Set Limit")
+
+md("""### 5.5 — Reset Context""", name="5.5 Reset Context")
+
+sql("""USE ROLE risk_admin;
+USE WAREHOUSE risk_wh;""", name="5.5 Reset Context SQL")
+
+# =============================================================================
+# STEP 6 — TIME TRAVEL & CLONING
+# =============================================================================
+md("""---
+## 6 · Time Travel & Zero-Copy Cloning""", name="6 · Time Travel & Cloning")
+
+md("""### 6.1 — Zero-Copy Clone
+`CLONE` creates an instant, metadata-only copy of a table (or database/schema). No data is physically duplicated — storage is shared until one side diverges.""", name="6.1 Zero-Copy Clone")
 
 sql("""USE ROLE risk_admin;
 
@@ -601,63 +702,63 @@ CREATE OR REPLACE TABLE raw_data.counterparties_dev
 
 SELECT 'PRODUCTION' AS source, COUNT(*) AS row_count FROM raw_data.counterparties
 UNION ALL
-SELECT 'DEV CLONE'  AS source, COUNT(*) AS row_count FROM raw_data.counterparties_dev;""", name="5.1 Clone Table")
+SELECT 'DEV CLONE'  AS source, COUNT(*) AS row_count FROM raw_data.counterparties_dev;""", name="6.1 Clone Table")
 
-md("""### 5.2 — Simulate an Accidental Update
-Oops — someone ran an UPDATE without a WHERE clause.""", name="5.2 Accidental Update")
+md("""### 6.2 — Simulate an Accidental Update
+Oops — someone ran an UPDATE without a WHERE clause.""", name="6.2 Accidental Update")
 
 sql("""UPDATE raw_data.counterparties
 SET is_active = FALSE;
 
 SELECT COUNT(*) AS active_count
 FROM raw_data.counterparties
-WHERE is_active = TRUE;""", name="5.2 Bad UPDATE")
+WHERE is_active = TRUE;""", name="6.2 Bad UPDATE")
 
-md("""### 5.3 — Recover with Time Travel
-**Time Travel** lets you query or restore data as it existed at any point within the retention window (1 day on trial, up to 90 days on Enterprise). Use `AT(OFFSET => -N)` where N is seconds in the past.""", name="5.3 Time Travel")
+md("""### 6.3 — Recover with Time Travel
+**Time Travel** lets you query or restore data as it existed at any point within the retention window (1 day on trial, up to 90 days on Enterprise). Use `AT(OFFSET => -N)` where N is seconds in the past.""", name="6.3 Time Travel")
 
 sql("""SELECT
     (SELECT COUNT(*) FROM raw_data.counterparties WHERE is_active = TRUE)
         AS current_active,
     (SELECT COUNT(*) FROM raw_data.counterparties AT(OFFSET => -60*5) WHERE is_active = TRUE)
-        AS five_min_ago_active;""", name="5.3a Compare Data")
+        AS five_min_ago_active;""", name="6.3a Compare Data")
 
 sql("""CREATE OR REPLACE TABLE raw_data.counterparties
     AS SELECT * FROM raw_data.counterparties AT(OFFSET => -60*5);
 
 SELECT COUNT(*) AS active_count
 FROM raw_data.counterparties
-WHERE is_active = TRUE;""", name="5.3b Restore Table")
+WHERE is_active = TRUE;""", name="6.3b Restore Table")
 
-md("""### 5.4 — UNDROP
-`UNDROP` recovers a dropped table, schema, or database within the Time Travel retention window — no backup restore needed.""", name="5.4 UNDROP")
+md("""### 6.4 — UNDROP
+`UNDROP` recovers a dropped table, schema, or database within the Time Travel retention window — no backup restore needed.""", name="6.4 UNDROP")
 
-sql("""DROP TABLE raw_data.counterparties_dev;""", name="5.4a Drop Table")
+sql("""DROP TABLE raw_data.counterparties_dev;""", name="6.4a Drop Table")
 
 sql("""UNDROP TABLE raw_data.counterparties_dev;
 
-SELECT COUNT(*) AS row_count FROM raw_data.counterparties_dev;""", name="5.4b Undrop Table")
+SELECT COUNT(*) AS row_count FROM raw_data.counterparties_dev;""", name="6.4b Undrop Table")
 
 sql("""-- Final cleanup of the dev clone
-DROP TABLE raw_data.counterparties_dev;""", name="5.4c Cleanup Clone")
+DROP TABLE raw_data.counterparties_dev;""", name="6.4c Cleanup Clone")
 
 # =============================================================================
-# STEP 6 — UNSTRUCTURED DATA
+# STEP 7 — UNSTRUCTURED DATA
 # =============================================================================
 md("""---
-## 6 · Unstructured Data""", name="6 · Unstructured Data")
+## 7 · Unstructured Data""", name="7 · Unstructured Data")
 
-md("""### 6.1 — Internal Stage with Directory Table
-An **Internal Stage** stores files (PDFs, images, CSVs, etc.) inside Snowflake. Enabling `DIRECTORY` adds an auto-populated metadata catalogue you can query with SQL.""", name="6.1 Internal Stage")
+md("""### 7.1 — Internal Stage with Directory Table
+An **Internal Stage** stores files (PDFs, images, CSVs, etc.) inside Snowflake. Enabling `DIRECTORY` adds an auto-populated metadata catalogue you can query with SQL.""", name="7.1 Internal Stage")
 
 sql("""USE SCHEMA unstructured;
 
 CREATE OR REPLACE STAGE risk_documents_stage
     DIRECTORY = (ENABLE = TRUE)
-    COMMENT   = 'Internal stage for regulatory and risk report documents';""", name="6.1 Create Stage")
+    COMMENT   = 'Internal stage for regulatory and risk report documents';""", name="7.1 Create Stage")
 
-md("""### 6.2 — Document Catalogue (Simulated)
-In production, upload files via `PUT` or the Snowsight UI and query `DIRECTORY(@stage)`. Here we simulate a catalogue table for six typical risk management documents.""", name="6.2 Document Catalogue")
+md("""### 7.2 — Document Catalogue (Simulated)
+In production, upload files via `PUT` or the Snowsight UI and query `DIRECTORY(@stage)`. Here we simulate a catalogue table for six typical risk management documents.""", name="7.2 Document Catalogue")
 
 sql("""CREATE OR REPLACE TABLE document_catalogue (
     doc_id       VARCHAR(10)  PRIMARY KEY,
@@ -681,21 +782,50 @@ INSERT INTO document_catalogue VALUES
     ('DOC005', 'Stress_Test_Results_2025.pdf',     'Stress Test',       'Enterprise Risk',
         '2025-12-20', 7800, 'Annual stress test results under adverse and severely adverse scenarios'),
     ('DOC006', 'AML_SAR_Filing_Template.pdf',      'Compliance',        'Financial Crime',
-        '2026-01-15',  890, 'Suspicious Activity Report template and filing guidance');""", name="6.2a Create & Load")
+        '2026-01-15',  890, 'Suspicious Activity Report template and filing guidance');""", name="7.2a Create & Load")
 
 sql("""SELECT doc_type, COUNT(*) AS doc_count, SUM(file_size_kb) AS total_size_kb
 FROM document_catalogue
 GROUP BY doc_type
-ORDER BY doc_count DESC;""", name="6.2b Query Catalogue")
+ORDER BY doc_count DESC;""", name="7.2b Query Catalogue")
 
 # =============================================================================
-# STEP 7 — MARKET DATA ENRICHMENT
+# STEP 8 — MARKET DATA ENRICHMENT
 # =============================================================================
 md("""---
-## 7 · Market Data Enrichment""", name="7 · Market Data")
+## 8 · Market Data Enrichment""", name="8 · Market Data")
 
-md("""### 7.1 — Generate Synthetic Market Data
-In production you would source market data from the **Snowflake Marketplace** (e.g. S&P Global, FactSet, Bloomberg). For this lab we generate a self-contained reference dataset of daily interest rates, FX rates, and CDS spreads using `GENERATOR`.""", name="7.1 Market Data")
+md("""### 8.1 — Acquire Data from Snowflake Marketplace
+The **Snowflake Marketplace** provides instant access to live, governed datasets from hundreds of providers — no ETL, no file transfers. For financial services, **FactSet** offers free sample datasets including portfolio analytics, sector attribution, and holdings data.
+
+**To install FactSet Analytics (sample):**
+1. Navigate to **Data Products > Marketplace** in the left sidebar
+2. Search for **"FactSet Analytics"** and select **FactSet Analytics (sample)** (Free)
+3. Click **Get** → accept the terms → assign to the `RISK_HOL` database or create a new database
+4. The shared database appears immediately — no data is copied; it's a live secure share
+
+> **Marketplace URL:** [FactSet Analytics (sample)](https://app.snowflake.com/marketplace/listing/GZT0ZGCQ51UP/factset-factset-analytics-sample)
+
+The dataset includes:
+
+| Table | Description |
+|---|---|
+| `CHARACTERISTICS` | Security-level fundamental characteristics and derived analytics |
+| `EQ_SECTOR_ATTRIBUTION` | Equity sector-level performance attribution |
+| `FI_SECTOR_ATTRIBUTION` | Fixed income sector attribution |
+| `FI_SECTOR_EXPOSURES` | Fixed income sector exposures |
+| `HOLDINGS` | Portfolio holdings with weights and valuations |""", name="8.1 Marketplace Acquisition")
+
+sql("""-- After installing the FactSet listing, query the equity sector attribution
+-- If you have not yet installed the listing, this query will fail — that's OK, continue to 8.2
+SELECT *
+FROM FACTSET_ANALYTICS__SAMPLE.FDS.EQ_SECTOR_ATTRIBUTION
+WHERE ACCT = 'OFFICIAL_PR_EQ_ACWI_X_US'
+  AND LEVEL = '3'
+LIMIT 20;""", name="8.1b Query FactSet Data")
+
+md("""### 8.2 — Generate Synthetic Market Data (Fallback)
+If you were unable to install the FactSet listing (e.g. on a trial account without Marketplace access), we generate a self-contained reference dataset of daily interest rates, FX rates, and CDS spreads using `GENERATOR`.""", name="8.2 Synthetic Market Data")
 
 sql("""USE ROLE risk_admin;
 USE SCHEMA analytics;
@@ -712,12 +842,12 @@ SELECT
     ROUND(0.78 + (UNIFORM(-300, 300, RANDOM())::FLOAT / 10000), 4) AS gbp_usd_rate,
     ROUND(148.0 + (UNIFORM(-500, 500, RANDOM())::FLOAT / 100), 2) AS usd_jpy_rate,
     ROUND(50 + UNIFORM(-20, 80, RANDOM())::FLOAT, 1) AS cds_spread_bps
-FROM date_spine d;""", name="7.1 Create Market Data")
+FROM date_spine d;""", name="8.2a Create Market Data")
 
-sql("""SELECT * FROM analytics.market_data ORDER BY market_date DESC LIMIT 10;""", name="7.1b Preview Market Data")
+sql("""SELECT * FROM analytics.market_data ORDER BY market_date DESC LIMIT 10;""", name="8.2b Preview Market Data")
 
-md("""### 7.2 — Enrich Risk Events with Market Context
-Join internal risk events with market data to see what conditions prevailed on the day each event occurred. This is how you would combine Marketplace data with your own tables.""", name="7.2 Enrich Data")
+md("""### 8.3 — Enrich Risk Events with Market Context
+Join internal risk events with market data to see what conditions prevailed on the day each event occurred. This is how you would combine Marketplace data (or synthetic data) with your own tables.""", name="8.3 Enrich Data")
 
 sql("""CREATE OR REPLACE VIEW analytics.risk_with_market_context AS
 SELECT
@@ -732,7 +862,7 @@ SELECT
     md.cds_spread_bps
 FROM analytics.risk_events re
 LEFT JOIN analytics.market_data md
-    ON re.event_date = md.market_date;""", name="7.2 Enriched View")
+    ON re.event_date = md.market_date;""", name="8.3a Enriched View")
 
 sql("""SELECT event_type, severity,
     ROUND(AVG(exposure_usd), 0) AS avg_exposure,
@@ -742,13 +872,13 @@ FROM analytics.risk_with_market_context
 WHERE event_date >= DATEADD('month', -6, CURRENT_DATE())
 GROUP BY event_type, severity
 ORDER BY avg_exposure DESC
-LIMIT 15;""", name="7.2b Query Enriched Data")
+LIMIT 15;""", name="8.3b Query Enriched Data")
 
 # =============================================================================
-# STEP 8 — CORTEX AI FUNCTIONS
+# STEP 9 — CORTEX AI FUNCTIONS
 # =============================================================================
 md("""---
-## 8 · Cortex AI Functions
+## 9 · Cortex AI Functions
 
 **Cortex AI Functions** let you run LLM-powered analytics directly in SQL — no Python, no external APIs, and your data never leaves Snowflake. In this step we apply four functions to the risk event descriptions.
 
@@ -757,10 +887,10 @@ md("""---
 | `AI_CLASSIFY` | Categorise text into predefined labels | Label (VARCHAR) |
 | `AI_SENTIMENT` | Score sentiment from -1 (negative) to +1 (positive) | FLOAT |
 | `AI_EXTRACT` | Extract structured fields from free text | OBJECT (JSON) |
-| `AI_SUMMARIZE` | Condense long text into a shorter summary | VARCHAR |""", name="8 · Cortex AI Functions")
+| `SUMMARIZE` | Condense long text into a shorter summary | VARCHAR |""", name="9 · Cortex AI Functions")
 
-md("""### 8.1 — AI_CLASSIFY: Categorise Risk Events
-`AI_CLASSIFY` assigns one of your predefined labels to each piece of text. Here we classify each risk event description into a regulatory category.""", name="8.1 AI_CLASSIFY")
+md("""### 9.1 — AI_CLASSIFY: Categorise Risk Events
+`AI_CLASSIFY` assigns one of your predefined labels to each piece of text. Here we classify each risk event description into a regulatory category.""", name="9.1 AI_CLASSIFY")
 
 sql("""SELECT
     event_id,
@@ -770,30 +900,31 @@ sql("""SELECT
         ['Market Risk', 'Credit Risk', 'Operational Risk', 'Liquidity Risk', 'Compliance']
     ):label::STRING AS ai_category
 FROM analytics.risk_events
-LIMIT 10;""", name="8.1 Classify Query")
+LIMIT 10;""", name="9.1 Classify Query")
 
-md("""### 8.2 — AI_SENTIMENT: Score Event Severity Tone
-`AI_SENTIMENT` returns a score from **-1** (very negative) to **+1** (very positive). Risk event descriptions should skew negative — let's verify.""", name="8.2 AI_SENTIMENT")
+md("""### 9.2 — AI_SENTIMENT: Score Event Severity Tone
+`AI_SENTIMENT` returns a sentiment classification for each text input. Risk event descriptions should skew negative — let's verify.""", name="9.2 AI_SENTIMENT")
 
 sql("""SELECT
     event_id,
     description,
     severity,
-    ROUND(SNOWFLAKE.CORTEX.AI_SENTIMENT(description), 3) AS sentiment_score
+    SNOWFLAKE.CORTEX.AI_SENTIMENT(description):categories[0]:sentiment::STRING AS sentiment
 FROM analytics.risk_events
-LIMIT 10;""", name="8.2 Sentiment Query")
+LIMIT 10;""", name="9.2 Sentiment Query")
 
 sql("""SELECT
     severity,
     COUNT(*) AS event_count,
-    ROUND(AVG(SNOWFLAKE.CORTEX.AI_SENTIMENT(description)), 3) AS avg_sentiment
+    COUNT_IF(SNOWFLAKE.CORTEX.AI_SENTIMENT(description):categories[0]:sentiment::STRING = 'negative') AS negative_count,
+    ROUND(negative_count / event_count * 100, 1) AS pct_negative
 FROM analytics.risk_events
 WHERE event_date >= DATEADD('month', -3, CURRENT_DATE())
 GROUP BY severity
-ORDER BY avg_sentiment;""", name="8.2b Sentiment by Severity")
+ORDER BY pct_negative DESC;""", name="9.2b Sentiment by Severity")
 
-md("""### 8.3 — AI_EXTRACT: Pull Structured Data from Text
-`AI_EXTRACT` extracts specific fields from unstructured text and returns them as a JSON object. Here we extract the **affected_system** and **trigger** from each event description.""", name="8.3 AI_EXTRACT")
+md("""### 9.3 — AI_EXTRACT: Pull Structured Data from Text
+`AI_EXTRACT` extracts specific fields from unstructured text and returns them as a JSON object. Here we extract the **affected_system** and **trigger** from each event description.""", name="9.3 AI_EXTRACT")
 
 sql("""SELECT
     event_id,
@@ -805,10 +936,10 @@ sql("""SELECT
     extracted:affected_system::STRING AS affected_system,
     extracted:trigger::STRING AS trigger
 FROM analytics.risk_events
-LIMIT 10;""", name="8.3 Extract Query")
+LIMIT 10;""", name="9.3 Extract Query")
 
-md("""### 8.4 — AI_SUMMARIZE: Summarise Risk Events
-`AI_SUMMARIZE` condenses text. While individual descriptions are already short, the function shines when you combine multiple rows using `LISTAGG` and summarise them into a single narrative.""", name="8.4 AI_SUMMARIZE")
+md("""### 9.4 — SUMMARIZE: Summarise Risk Events
+`SUMMARIZE` condenses text. While individual descriptions are already short, the function shines when you combine multiple rows using `LISTAGG` and summarise them into a single narrative.""", name="9.4 SUMMARIZE")
 
 sql("""WITH recent_critical AS (
     SELECT LISTAGG(description, '. ') WITHIN GROUP (ORDER BY event_date DESC) AS all_descriptions
@@ -816,8 +947,8 @@ sql("""WITH recent_critical AS (
     WHERE severity = 'CRITICAL'
         AND event_date >= DATEADD('month', -1, CURRENT_DATE())
 )
-SELECT SNOWFLAKE.CORTEX.AI_SUMMARIZE(all_descriptions) AS critical_events_summary
-FROM recent_critical;""", name="8.4 Summarise Query")
+SELECT SNOWFLAKE.CORTEX.SUMMARIZE(all_descriptions) AS critical_events_summary
+FROM recent_critical;""", name="9.4 Summarise Query")
 
 # =============================================================================
 # STEP 10 — CLEANUP
@@ -828,6 +959,7 @@ Drop the lab schemas, warehouse, and custom roles. The **NOTEBOOKS** schema is p
 
 sql("""USE ROLE accountadmin;
 
+DROP RESOURCE MONITOR IF EXISTS risk_wh_monitor;
 DROP SCHEMA IF EXISTS risk_hol.raw_data;
 DROP SCHEMA IF EXISTS risk_hol.analytics;
 DROP SCHEMA IF EXISTS risk_hol.governance;
@@ -852,7 +984,7 @@ notebook = {
     "nbformat_minor": 5
 }
 
-with open("/Users/nbaxter/Downloads/neil-fs-hol/scripts/risk_hol_workbook.ipynb", "w") as f:
+with open("/Users/nbaxter/Downloads/financial-risk-hol/scripts/risk_hol_workbook.ipynb", "w") as f:
     json.dump(notebook, f, indent=1)
 
 md_count = sum(1 for c in cells if c["cell_type"] == "markdown")
