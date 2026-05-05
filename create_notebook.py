@@ -369,6 +369,19 @@ SELECT
     )
 FROM TABLE(GENERATOR(ROWCOUNT => 10000));""", name="3.2b Insert JSON")
 
+md("""> **Production note — Streaming Ingestion**
+>
+> In this lab we used `INSERT ... SELECT` with `GENERATOR` to simulate bulk loading. In production, risk events would stream in continuously from upstream systems. Snowflake offers two paths for real-time ingestion:
+>
+> | Method | How it works | When to use |
+> |---|---|---|
+> | **Snowflake Kafka Connector** | A Kafka Connect sink connector pushes messages from Kafka topics directly into Snowflake tables as VARIANT rows — exactly like our `risk_events_raw` table. | You already have a Kafka cluster (Confluent, AWS MSK, etc.) |
+> | **Snowpipe Streaming** | A lightweight Java/Python SDK pushes rows directly into Snowflake with sub-second latency — no staging files, no Kafka required. | You want the lowest latency without managing Kafka infrastructure |
+>
+> Both methods land data as VARIANT JSON in the same table structure we built above. The Dynamic Tables in Step 3.4 would automatically transform new rows as they arrive — no changes needed downstream.
+>
+> *Neither method is used in this lab because they require external client infrastructure that isn't available in a trial-account notebook.*""", name="3.2c Production Note")
+
 md("""### 3.3 — Query VARIANT with Colon Notation
 Access JSON fields directly using **colon notation** (`payload:field`) and cast to SQL types with `::STRING`, `::DATE`, etc.""", name="3.3 Query VARIANT")
 
