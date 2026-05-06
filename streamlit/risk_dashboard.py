@@ -11,7 +11,18 @@ ASN_CHARCOAL = "#4A4A4A"
 ASN_GREEN = "#00A651"
 ASN_LIGHT_GREY = "#F5F5F5"
 
-ASN_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/ASN_Bank_logo.svg/200px-ASN_Bank_logo.svg.png"
+ASN_LOGO_SVG = """
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 60" width="200">
+  <text x="0" y="45" font-family="Georgia, serif" font-size="36" fill="#4A4A4A" font-weight="400">asn</text>
+  <g transform="translate(82, 5) scale(0.35)">
+    <path d="M70 10 C50 10, 30 30, 35 55 C38 70, 50 85, 65 95 C55 80, 55 65, 60 55
+             C65 45, 75 40, 80 35 C85 30, 85 20, 70 10 Z
+             M72 50 C68 55, 65 62, 68 68 C70 72, 75 70, 73 65 C71 60, 74 55, 72 50 Z"
+          fill="#E84E0F"/>
+  </g>
+  <text x="118" y="45" font-family="Georgia, serif" font-size="36" fill="#4A4A4A" font-weight="400">bank</text>
+</svg>
+"""
 
 st.markdown(f"""
 <style>
@@ -27,7 +38,7 @@ div[data-testid="stMetricLabel"] {{ font-weight: 600; color: {ASN_CHARCOAL}; }}
 session = get_active_session()
 
 with st.sidebar:
-    st.image(ASN_LOGO_URL, width=180)
+    st.markdown(ASN_LOGO_SVG, unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("Filters")
 
