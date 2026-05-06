@@ -4,28 +4,30 @@ import altair as alt
 import pandas as pd
 from datetime import date
 
-st.set_page_config(page_title="Risk Exposure Dashboard", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="Risk Exposure Dashboard — ASN Bank", page_icon="🦊", layout="wide")
 
+ASN_ORANGE = "#E84E0F"
+ASN_CHARCOAL = "#4A4A4A"
 ASN_GREEN = "#00A651"
-ASN_DARK = "#004D25"
-ASN_LIGHT = "#E6F7ED"
+ASN_LIGHT_GREY = "#F5F5F5"
+
+ASN_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/ASN_Bank_logo.svg/200px-ASN_Bank_logo.svg.png"
 
 st.markdown(f"""
 <style>
-[data-testid="stMetricValue"] {{ font-size: 1.8rem; color: {ASN_GREEN}; }}
-h1, h2, h3 {{ color: {ASN_DARK}; }}
-[data-testid="stSidebar"] {{ background-color: {ASN_LIGHT}; }}
-div[data-testid="stMetricLabel"] {{ font-weight: 600; }}
+[data-testid="stMetricValue"] {{ font-size: 1.8rem; color: {ASN_ORANGE}; }}
+h1 {{ color: {ASN_CHARCOAL}; font-weight: 300; letter-spacing: -0.5px; }}
+h2, h3 {{ color: {ASN_CHARCOAL}; font-weight: 400; }}
+[data-testid="stSidebar"] {{ background-color: {ASN_LIGHT_GREY}; }}
+div[data-testid="stMetricLabel"] {{ font-weight: 600; color: {ASN_CHARCOAL}; }}
+.stCaption {{ color: #888; }}
 </style>
 """, unsafe_allow_html=True)
 
 session = get_active_session()
 
-st.title("🏦 Risk Exposure Dashboard")
-st.caption(f"ASN Bank — {date.today().strftime('%d %B %Y')}")
-
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/ASN_Bank_logo.svg/200px-ASN_Bank_logo.svg.png", width=160)
+    st.image(ASN_LOGO_URL, width=180)
     st.markdown("---")
     st.subheader("Filters")
 
@@ -37,6 +39,12 @@ with st.sidebar:
 
     event_type_options = ["All", "CREDIT", "MARKET", "OPERATIONAL", "LIQUIDITY", "COUNTERPARTY"]
     selected_event_type = st.selectbox("Event Type", event_type_options)
+
+    st.markdown("---")
+    st.caption("Duurzaam bankieren sinds 1960")
+
+st.title("Risk Exposure Dashboard")
+st.caption(f"ASN Bank  ·  {date.today().strftime('%d %B %Y')}")
 
 
 @st.cache_data(ttl=60)
@@ -83,7 +91,7 @@ col_left, col_right = st.columns(2)
 with col_left:
     st.subheader("Total Exposure by Event Type")
     chart_type = df.groupby("EVENT_TYPE")["TOTAL_EXPOSURE"].sum().reset_index()
-    bar = alt.Chart(chart_type).mark_bar(color=ASN_GREEN).encode(
+    bar = alt.Chart(chart_type).mark_bar(color=ASN_ORANGE).encode(
         x=alt.X("TOTAL_EXPOSURE:Q", title="Total Exposure ($)"),
         y=alt.Y("EVENT_TYPE:N", sort="-x", title=""),
         tooltip=["EVENT_TYPE", "TOTAL_EXPOSURE"]
@@ -94,7 +102,7 @@ with col_right:
     st.subheader("Event Count by Month")
     monthly = df.groupby("MONTH")["EVENT_COUNT"].sum().reset_index()
     line = alt.Chart(monthly).mark_line(
-        point=True, strokeWidth=2, color=ASN_GREEN
+        point=True, strokeWidth=2, color=ASN_ORANGE
     ).encode(
         x=alt.X("MONTH:T", title="Month"),
         y=alt.Y("EVENT_COUNT:Q", title="Event Count"),
@@ -110,7 +118,9 @@ severity_order = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 heatmap = alt.Chart(heatmap_data).mark_rect().encode(
     x=alt.X("REGION:N", title="Region"),
     y=alt.Y("SEVERITY:N", sort=severity_order, title="Severity"),
-    color=alt.Color("EVENT_COUNT:Q", scale=alt.Scale(scheme="greens"), title="Events"),
+    color=alt.Color("EVENT_COUNT:Q",
+                    scale=alt.Scale(scheme="oranges"),
+                    title="Events"),
     tooltip=["SEVERITY", "REGION", "EVENT_COUNT"]
 ).properties(height=250)
 st.altair_chart(heatmap, use_container_width=True)
@@ -119,4 +129,4 @@ st.divider()
 
 st.subheader("Filtered Data")
 st.dataframe(df, use_container_width=True)
-st.caption("Data is synthetic and for demonstration purposes only. | ASN Bank — Duurzaam bankieren.")
+st.caption("Data is synthetic and for demonstration purposes only.  ·  ASN Bank — Duurzaam bankieren.")
